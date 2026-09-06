@@ -91,7 +91,6 @@ jobs:
         for s in \
           CONFIG_TARGET_rockchip=y \
           CONFIG_TARGET_rockchip_armv8=y \
-          CONFIG_TARGET_DEVICE_rockchip_armv8_DEVICE_friendlyarm_nanopi-r5s=y \
           CONFIG_TARGET_ROOTFS_EXT4FS=y \
           CONFIG_TARGET_ROOTFS_PARTSIZE=8192 \
           CONFIG_ALL_KMODS=y \
@@ -103,6 +102,16 @@ jobs:
           CONFIG_PACKAGE_luci-app-mosdns=y ; do
           if grep -qx "$s" .config; then echo "  OK   $s"; else echo "  MISS $s"; fail=1; fi
         done
+        echo "### 设备 profile（两种写法任一即可） ###"
+        if grep -qx 'CONFIG_TARGET_DEVICE_rockchip_armv8_DEVICE_friendlyarm_nanopi-r5s=y' .config; then
+          echo "  OK   multi-profile 形式"
+        elif grep -qx 'CONFIG_TARGET_rockchip_armv8_DEVICE_friendlyarm_nanopi-r5s=y' .config; then
+          echo "  OK   single-profile 形式"
+        else
+          echo "  MISS 两种形式都没有 —— 设备没选上"
+          grep -E '^CONFIG_TARGET_(PROFILE|MULTI_PROFILE)|nanopi-r5s' .config || true
+          fail=1
+        fi
         echo "### 可选（缺失只告警） ###"
         for s in \
           CONFIG_PACKAGE_luci-app-openclash=y \
@@ -197,6 +206,7 @@ jobs:
       with:
         name: config-${{ github.run_number }}
         path: /mnt/workdir/openwrt/.config
+        include-hidden-files: true
         if-no-files-found: warn
 
     - name: Collect logs on failure
@@ -205,7 +215,7 @@ jobs:
         cd $WORKDIR/openwrt
         mkdir -p /tmp/faillogs
         cp -r logs /tmp/faillogs/ 2>/dev/null || true
-        cp .config /tmp/faillogs/ 2>/dev/null || true
+        cp .config /tmp/faillogs/config.txt 2>/dev/null || true
         df -hT / /mnt > /tmp/faillogs/df.txt
         find /tmp/faillogs -name '*.txt' | head -50
 
@@ -215,4 +225,5 @@ jobs:
       with:
         name: faillogs-${{ github.run_number }}
         path: /tmp/faillogs
+        include-hidden-files: true
         if-no-files-found: warn
