@@ -127,7 +127,9 @@ jobs:
           CONFIG_PACKAGE_ethtool=y \
           CONFIG_PACKAGE_lsblk=y \
           CONFIG_PACKAGE_kmod-fs-ntfs3=y \
-          CONFIG_PACKAGE_kmod-nvme=y ; do
+          CONFIG_PACKAGE_kmod-nvme=y \
+          CONFIG_PACKAGE_mosdns=y \
+          CONFIG_PACKAGE_geo2txt=y ; do
           if grep -qx "$s" .config; then echo "  OK   $s"; else echo "  WARN $s (被 defconfig 丢弃)"; fi
         done
         echo "kmod 模块总数: $(grep -c '^CONFIG_PACKAGE_kmod-.*=m$' .config)"

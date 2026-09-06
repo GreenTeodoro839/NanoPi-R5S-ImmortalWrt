@@ -15,7 +15,7 @@
 ## 内容
 
 - **代理**：PassWall / OpenClash / HomeProxy / Nikki(mihomo)
-- **DNS**：MosDNS（sbwml v5）
+- **DNS**：MosDNS（feed 自带 5.3.3 本体 + sbwml 的 LuCI 界面）
 - **容器**：dockerd + docker-compose + DockerMan
 - **NAS**：DiskMan、Samba4、qBittorrent、FileBrowser
 - **商店**：iStore
@@ -32,6 +32,16 @@ targets/rockchip/armv8/kmods/6.6.x-1-<md5>/
 自己编译的内核配置跟官方不一样，哈希对不上，官方 kmod 源用不了。而 `include/feeds.mk` 里那行 kmods feed 只在 `CONFIG_BUILDBOT=y` 时才写进 `distfeeds.conf`，自编译固件默认根本没有 kmod 源。
 
 所以这里开 `CONFIG_ALL_KMODS=y` 编出全部 kmod，`make package/index` 生成签名索引，塞进 rootfs，用 opkg 原生支持的 `file:` 协议（`libopkg/opkg_download.c` 里直接走 `file_copy`）当本地源。
+
+## 关于 MosDNS 的版本选择
+
+sbwml `v5` 分支里的 mosdns 是 **5.3.4**，`go.mod` 要求 **Go 1.24.9**；而 ImmortalWrt
+24.10 自带的 golang 是 **1.23.12**，直接用会编译失败。feed 自带的 mosdns **5.3.3**
+只要求 Go 1.22，能正常编译。
+
+所以这里只从 sbwml 取 `luci-app-mosdns` 和 `geo2txt`（纯 C），本体用 feed 里的，
+**不动 golang 工具链**——换 golang 会连带影响 xray / sing-box / mihomo 等一整串
+Go 包的编译。
 
 ## 刷机
 
