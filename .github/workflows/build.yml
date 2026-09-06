@@ -1,0 +1,218 @@
+name: Build ImmortalWrt for NanoPi R5S
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'configs/**'
+      - 'scripts/**'
+      - '.github/workflows/build.yml'
+
+env:
+  REPO_URL: https://github.com/immortalwrt/immortalwrt
+  REPO_BRANCH: openwrt-24.10
+  CONFIG_FILE: configs/r5s.config
+  DIY_P1_SH: scripts/diy-part1.sh
+  DIY_P2_SH: scripts/diy-part2.sh
+  WORKDIR: /mnt/workdir
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Free up disk space
+      run: |
+        echo "=== 清理前 ==="
+        df -hT / /mnt
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                    /usr/local/share/boost /usr/local/share/powershell \
+                    /usr/share/swift /usr/local/.ghcup "$AGENT_TOOLSDIRECTORY" || true
+        sudo docker image prune --all --force || true
+        sudo apt-get -qq purge -y azure-cli google-chrome-stable firefox \
+                    powershell mono-devel libgl1-mesa-dri temurin-* || true
+        sudo apt-get -qq autoremove -y || true
+        sudo apt-get -qq clean
+        echo "=== 清理后 ==="
+        df -hT / /mnt
+
+    - name: Install build dependencies
+      run: |
+        sudo apt-get -qq update
+        sudo apt-get -qq install -y \
+          build-essential clang flex bison g++ gawk \
+          gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
+          python3 python3-setuptools python3-pip rsync swig unzip zlib1g-dev \
+          file wget subversion patch pkgconf zstd ccache \
+          gperf libtool libltdl-dev intltool libxml-parser-perl \
+          gnutls-bin libgnutls28-dev p7zip-full ninja-build
+        sudo timedatectl set-timezone "$TZ"
+
+    - name: Prepare workdir
+      run: |
+        sudo mkdir -p $WORKDIR
+        sudo chown -R $USER:$USER $WORKDIR
+
+    - name: Clone ImmortalWrt source
+      run: |
+        git clone --depth 1 -b $REPO_BRANCH $REPO_URL $WORKDIR/openwrt
+        cd $WORKDIR/openwrt
+        echo "SOURCE_COMMIT=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+        echo "KERNEL=$(grep -m1 KERNEL_PATCHVER target/linux/rockchip/Makefile)" >> $GITHUB_ENV
+
+    - name: Run diy-part1 (third-party packages)
+      run: |
+        cd $WORKDIR/openwrt
+        bash $GITHUB_WORKSPACE/$DIY_P1_SH
+
+    - name: Update & install feeds
+      run: |
+        cd $WORKDIR/openwrt
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+    - name: Load config & run diy-part2
+      run: |
+        cd $WORKDIR/openwrt
+        cp $GITHUB_WORKSPACE/$CONFIG_FILE .config
+        bash $GITHUB_WORKSPACE/$DIY_P2_SH
+        make defconfig
+
+    - name: Verify resolved config
+      run: |
+        cd $WORKDIR/openwrt
+        fail=0
+        echo "### 必须存在（缺失即失败） ###"
+        for s in \
+          CONFIG_TARGET_rockchip=y \
+          CONFIG_TARGET_rockchip_armv8=y \
+          CONFIG_TARGET_DEVICE_rockchip_armv8_DEVICE_friendlyarm_nanopi-r5s=y \
+          CONFIG_TARGET_ROOTFS_EXT4FS=y \
+          CONFIG_TARGET_ROOTFS_PARTSIZE=8192 \
+          CONFIG_ALL_KMODS=y \
+          CONFIG_PACKAGE_dockerd=y \
+          CONFIG_PACKAGE_luci-app-dockerman=y \
+          CONFIG_PACKAGE_luci-app-passwall=y \
+          CONFIG_PACKAGE_luci-app-store=y \
+          CONFIG_PACKAGE_luci-app-nikki=y \
+          CONFIG_PACKAGE_luci-app-mosdns=y ; do
+          if grep -qx "$s" .config; then echo "  OK   $s"; else echo "  MISS $s"; fail=1; fi
+        done
+        echo "### 可选（缺失只告警） ###"
+        for s in \
+          CONFIG_PACKAGE_luci-app-openclash=y \
+          CONFIG_PACKAGE_luci-app-homeproxy=y \
+          CONFIG_PACKAGE_luci-app-qbittorrent=y \
+          CONFIG_PACKAGE_luci-app-filebrowser=y \
+          CONFIG_PACKAGE_luci-app-diskman=y \
+          CONFIG_PACKAGE_luci-app-samba4=y \
+          CONFIG_PACKAGE_luci-theme-argon=y \
+          CONFIG_PACKAGE_mihomo-meta=y \
+          CONFIG_PACKAGE_htop=y \
+          CONFIG_PACKAGE_ethtool=y \
+          CONFIG_PACKAGE_lsblk=y \
+          CONFIG_PACKAGE_kmod-fs-ntfs3=y \
+          CONFIG_PACKAGE_kmod-nvme=y ; do
+          if grep -qx "$s" .config; then echo "  OK   $s"; else echo "  WARN $s (被 defconfig 丢弃)"; fi
+        done
+        echo "kmod 模块总数: $(grep -c '^CONFIG_PACKAGE_kmod-.*=m$' .config)"
+        [ $fail -eq 0 ] || { echo "关键配置缺失，中止"; exit 1; }
+
+    - name: Download sources
+      run: |
+        cd $WORKDIR/openwrt
+        make download -j8 || make download -j1 V=s
+        find dl -size -1024c -exec rm -f {} \; || true
+
+    - name: Compile tools & toolchain
+      run: |
+        cd $WORKDIR/openwrt
+        make tools/compile -j$(nproc) || make tools/compile -j1 V=s
+        make toolchain/compile -j$(nproc) || make toolchain/compile -j1 V=s
+
+    - name: Compile kernel
+      run: |
+        cd $WORKDIR/openwrt
+        make target/compile -j$(nproc) || make target/compile -j1 V=s
+
+    - name: Compile packages (all kmods + userspace)
+      run: |
+        cd $WORKDIR/openwrt
+        make package/compile -j$(nproc) IGNORE_ERRORS=1
+        df -hT /mnt
+
+    - name: Generate package index
+      run: |
+        cd $WORKDIR/openwrt
+        make package/index
+        echo "=== 索引产物 ==="
+        ls -la bin/targets/rockchip/armv8/packages/ | head -5
+        echo "kmod ipk 数量: $(ls bin/targets/rockchip/armv8/packages/kmod-*.ipk 2>/dev/null | wc -l)"
+        du -sh bin/targets/rockchip/armv8/packages/
+
+    - name: Embed local kmod feed into rootfs
+      run: |
+        cd $WORKDIR/openwrt
+        mkdir -p files/usr/lib/opkg/kmods
+        cp -r bin/targets/rockchip/armv8/packages/. files/usr/lib/opkg/kmods/
+        mkdir -p files/etc/opkg
+        echo 'src/gz local_kmods file:///usr/lib/opkg/kmods' > files/etc/opkg/customfeeds.conf
+        echo "=== 内置源体积 ==="
+        du -sh files/usr/lib/opkg/kmods
+
+    - name: Build rootfs & image
+      run: |
+        cd $WORKDIR/openwrt
+        make package/install -j$(nproc) || make package/install -j1 V=s
+        make target/install -j$(nproc) || make target/install -j1 V=s
+        make checksum
+
+    - name: Collect firmware
+      run: |
+        cd $WORKDIR/openwrt/bin/targets/rockchip/armv8
+        rm -rf packages
+        echo "=== 产物 ==="
+        ls -lh
+        echo "FIRMWARE_DIR=$PWD" >> $GITHUB_ENV
+        echo "BUILD_DATE=$(date +'%Y%m%d-%H%M')" >> $GITHUB_ENV
+
+    - name: Upload firmware
+      uses: actions/upload-artifact@v4
+      with:
+        name: immortalwrt-nanopi-r5s-${{ env.BUILD_DATE }}
+        path: |
+          ${{ env.FIRMWARE_DIR }}/*.img.gz
+          ${{ env.FIRMWARE_DIR }}/*.manifest
+          ${{ env.FIRMWARE_DIR }}/sha256sums
+        if-no-files-found: error
+
+    - name: Upload .config
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: config-${{ github.run_number }}
+        path: /mnt/workdir/openwrt/.config
+        if-no-files-found: warn
+
+    - name: Collect logs on failure
+      if: failure()
+      run: |
+        cd $WORKDIR/openwrt
+        mkdir -p /tmp/faillogs
+        cp -r logs /tmp/faillogs/ 2>/dev/null || true
+        cp .config /tmp/faillogs/ 2>/dev/null || true
+        df -hT / /mnt > /tmp/faillogs/df.txt
+        find /tmp/faillogs -name '*.txt' | head -50
+
+    - name: Upload failure logs
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: faillogs-${{ github.run_number }}
+        path: /tmp/faillogs
+        if-no-files-found: warn
