@@ -71,12 +71,33 @@ Go 包的编译。
 
 ## 刷完之后要做的
 
-跑代理的话先关掉 ImmortalWrt 默认开启的加速（它给 firewall4 打了补丁，默认 `flow_offloading` / `flow_offloading_hw` / `fullcone` 全开）：
+ImmortalWrt 给 firewall4 打了补丁，默认 `flow_offloading` / `flow_offloading_hw` /
+`fullcone` 全开。**这几项跑透明代理时不需要关**：
 
-```sh
-uci set firewall.@defaults[0].flow_offloading_hw='0'
-uci set firewall.@defaults[0].flow_offloading='0'
-uci commit firewall && /etc/init.d/firewall restart
+firewall4 的 offload 规则只出现在 forward 链：
+
 ```
+chain forward {
+    type filter hook forward priority filter;
+    meta l4proto { tcp, udp } flow offload @ft;
+    ...
+}
+```
+
+透明代理的流量在 `mangle prerouting` 被 TPROXY 标记后本地投递进 core，不经过
+forward 链，因此永远不会进 flowtable。直连流量走 forward，正常吃到分载加速。
+两者按设计共存。
+
+`flow_offloading_hw` 在 R5S 上也无需操心：r8125/stmmac 没有 flowtable 硬件卸载
+能力，fw4 的 `nft_try_hw_offload()` 会先用 `nft -c` 干跑测试，失败就打印
+"Hardware flow offloading unavailable, falling back to software offloading"
+并自动降级为软件分载。
+
+### 需要留意的
+
+- **SQM 与 flow offload 可能互斥**（社区普遍说法，本项目未验证）。若用
+  `luci-app-sqm` 限速，实测一下限速是否生效；不生效就关掉 `flow_offloading`。
+- 已被 offload 的直连连接不会重新匹配规则。把某域名从直连改到代理后，**已建立的
+  连接**仍走直连，新连接才生效。
 
 Docker 建议用 macvlan 或 host 网络，别用 bridge —— `dockerd` 依赖链会拉进 `br_netfilter`，Docker 启动时打开 `bridge-nf-call-iptables`，会让 PassWall 的 UDP 透明代理失效。
