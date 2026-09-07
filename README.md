@@ -9,7 +9,7 @@
 | 上游 | [ImmortalWrt](https://github.com/immortalwrt/immortalwrt) `openwrt-24.10`（内核 6.6） |
 | 设备 | `rockchip / armv8 / friendlyarm_nanopi-r5s` |
 | 网卡驱动 | `kmod-r8125`（ImmortalWrt 自带，厂商驱动，优于官方 OpenWrt 的 `r8169`） |
-| 根文件系统 | ext4，8192 MB（跑 Docker + NAS，刷 32GB eMMC） |
+| 根文件系统 | squashfs + overlay，分区 2 = **2048 MB**（其余 eMMC 空间留给 Docker） |
 | 默认地址 | `192.168.11.1` |
 
 ## 内容
@@ -57,6 +57,73 @@ Go 包的编译。
 | `main` | `luasrc/` | 老 Lua 版，24.10 上界面打不开 ❌ |
 
 后端 `adguardhome` 用 ImmortalWrt feed 自带的，不额外引入。
+
+## 分区规划（重要）
+
+镜像本身只有两个分区（`gen_image_generic.sh` 里 `ptgen` 只切两个）：
+
+```
+p1  boot     64 MB   内核 + dtb
+p2  rootfs 2048 MB   squashfs(只读) + 剩余空间做 overlay
+--  剩余的 eMMC 空间：留白，刷完机后自己建 p3 给 Docker
+```
+
+Docker 数据**必须**放在 p3 这种真实 ext4 分区上，不能放 overlay。原因见下节。
+
+### ROOTFS_PARTSIZE 定了就别改
+
+`target/linux/rockchip/armv8/base-files/lib/upgrade/platform.sh`：
+
+```sh
+diff="$(grep -F -x -v -f /tmp/partmap.bootdisk /tmp/partmap.image)"
+if [ -n "$diff" ]; then
+    get_image "$@" | dd of="/dev/$diskdev" bs=4096 conv=fsync   # 整盘写，p3 全没
+fi
+while read part start size; do ...  # diff 为空时只写镜像里的 p1/p2，p3 保住
+```
+
+diff 算的是"镜像里有、磁盘上没有"的分区，你手工加的 p3 不在镜像里，所以不触发。
+但只要你改了 `ROOTFS_PARTSIZE` 重编，分区表就对不上 → 整盘 dd → **Docker 数据全丢**。
+
+## 为什么 Docker 不能放 overlay
+
+Docker 27 已经没有"overlay2 不支持 overlayfs"的硬编码黑名单了，改成运行时探测，
+而内核的栈深度限制是 `FILESYSTEM_MAX_STACK_DEPTH = 2`，overlay 套 overlay 正好
+等于 2，**探测会通过，Docker 会选中 overlay2**。
+
+问题在 xattr。`fs/overlayfs/super.c`：
+
+```c
+static int ovl_own_xattr_set(...) { return -EOPNOTSUPP; }
+
+static const struct xattr_handler ovl_own_trusted_xattr_handler = {
+	.prefix = OVL_XATTR_TRUSTED_PREFIX,   /* "trusted.overlay." */
+	.set = ovl_own_xattr_set,
+};
+```
+
+overlayfs 拒绝对自己私有 xattr 的读写。内层 overlay 要往 upperdir 写
+`trusted.overlay.opaque` 来记录"此目录已删除"，落在外层 overlay 上就是 `-EOPNOTSUPP`。
+内核不报错，而是降级：
+
+```c
+err = ovl_setxattr(ofs, ofs->workdir, OVL_XATTR_OPAQUE, "0", 1);
+if (err) {
+	pr_warn("failed to set xattr on upper\n");
+	ofs->noxattr = true;      /* redirect_dir/metacopy/index/xino 全关 */
+}
+```
+
+结果是**能跑但功能残缺**：容器里删掉来自底层镜像的目录记录不下来，重建时文件可能
+复活；`index=off` 导致层间无法硬链接共享，磁盘占用膨胀。比干净地退回 vfs 更麻烦，
+因为它看起来是正常的。
+
+刷完机可以自查：
+
+```sh
+dmesg | grep -i overlay        # 不该出现 "failed to set xattr on upper"
+docker info | grep -i 'storage driver'
+```
 
 ## 刷机
 
