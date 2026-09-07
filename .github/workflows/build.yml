@@ -16,6 +16,14 @@ env:
   DIY_P2_SH: scripts/diy-part2.sh
   WORKDIR: /mnt/workdir
   TZ: Asia/Shanghai
+  # rules.mk:346 把 CCACHE_DIR 定死在 $(TOPDIR)/.ccache，这里只管容量和校验方式。
+  # compilercheck=content：工具链是从缓存里解出来的，mtime 每次都变，用内容校验才有命中率。
+  CCACHE_MAXSIZE: 3G
+  CCACHE_COMPILERCHECK: content
+
+permissions:
+  contents: read
+  actions: write      # 清理旧缓存条目要写 actions
 
 jobs:
   build:
@@ -100,7 +108,9 @@ jobs:
           CONFIG_PACKAGE_luci-app-passwall=y \
           CONFIG_PACKAGE_luci-app-store=y \
           CONFIG_PACKAGE_luci-app-nikki=y \
-          CONFIG_PACKAGE_luci-app-mosdns=y ; do
+          CONFIG_PACKAGE_luci-app-mosdns=y \
+          CONFIG_DEVEL=y \
+          CONFIG_CCACHE=y ; do
           if grep -qx "$s" .config; then echo "  OK   $s"; else echo "  MISS $s"; fail=1; fi
         done
         echo "### 设备 profile（两种写法任一即可） ###"
@@ -146,6 +156,56 @@ jobs:
         echo "kmod 模块总数: $(grep -c '^CONFIG_PACKAGE_kmod-.*=m$' .config)"
         [ $fail -eq 0 ] || { echo "关键配置缺失，中止"; exit 1; }
 
+    - name: Compute cache keys
+      id: ck
+      run: |
+        cd $WORKDIR/openwrt
+        # 工具链缓存里全是绝对路径（libtool .la / pkg-config .pc / 各种 wrapper 脚本），
+        # WORKDIR 一变就全废，所以把它拌进 key。
+        # 只取和工具链相关的 .config 行：改个软件包选择不该让 35 分钟的工具链作废。
+        TC=$( { echo "$WORKDIR"
+                find tools toolchain include -type f -print0 | sort -z | xargs -0 sha256sum
+                grep -E '^CONFIG_(ARCH|CPU_TYPE|TARGET_(rockchip|ARCH_PACKAGES|SUFFIX|OPTIMIZATION)|GCC_|BINUTILS_|LIBC|USE_(MUSL|GLIBC)|TOOLCHAIN_|CCACHE|DEVEL)' .config
+              } | sha256sum | cut -c1-16 )
+        echo "toolchain=$TC" >> $GITHUB_OUTPUT
+        echo "工具链 key: $TC"
+
+    - name: Restore toolchain cache
+      id: tc-cache
+      uses: actions/cache/restore@v4
+      with:
+        # 只吃精确命中。半匹配的工具链比没有更危险，宁可重编 35 分钟。
+        key: toolchain-${{ steps.ck.outputs.toolchain }}
+        path: |
+          /mnt/workdir/openwrt/staging_dir/host
+          /mnt/workdir/openwrt/staging_dir/toolchain-*
+          /mnt/workdir/openwrt/build_dir/host
+          /mnt/workdir/openwrt/build_dir/toolchain-*
+
+    - name: Restore ccache
+      uses: actions/cache/restore@v4
+      with:
+        key: ccache-${{ github.run_id }}
+        restore-keys: ccache-
+        path: /mnt/workdir/openwrt/.ccache
+
+    - name: Restore Go caches
+      uses: actions/cache/restore@v4
+      with:
+        # GOCACHE（编译产物）+ GOMODCACHE（模块源码，golang-values.mk:258 定在 dl/ 里）。
+        # ccache 对 Go 完全无效，代理那几个大件全靠这个。
+        key: gocache-${{ github.run_id }}
+        restore-keys: gocache-
+        path: |
+          /mnt/workdir/openwrt/.go-build-cache
+          /mnt/workdir/openwrt/dl/go-mod-cache
+
+    - name: Reset ccache stats
+      run: |
+        cd $WORKDIR/openwrt
+        CCACHE_DIR=$PWD/.ccache ccache -z >/dev/null 2>&1 || true
+        echo "工具链缓存命中: ${{ steps.tc-cache.outputs.cache-hit || 'false' }}"
+
     - name: Check package prerequisites
       run: |
         cd $WORKDIR/openwrt
@@ -157,7 +217,9 @@ jobs:
       run: |
         cd $WORKDIR/openwrt
         make download -j8 || make download -j1 V=s
-        find dl -size -1024c -exec rm -f {} \; || true
+        # 只清 dl/ 顶层的残缺下载。不能递归：dl/go-mod-cache 里全是 .mod/.info
+        # 这类几百字节的小文件，递归删会把刚恢复的 Go 模块缓存清空。
+        find dl -maxdepth 1 -type f -size -1024c -delete || true
 
     - name: Compile tools & toolchain
       run: |
@@ -175,6 +237,65 @@ jobs:
         cd $WORKDIR/openwrt
         make package/compile -j$(nproc) IGNORE_ERRORS=1
         df -hT /mnt
+
+    - name: Cache stats
+      if: always()
+      run: |
+        cd $WORKDIR/openwrt
+        echo "=== ccache ==="
+        CCACHE_DIR=$PWD/.ccache ccache -s 2>/dev/null || echo "ccache 没启用？"
+        echo "=== 各缓存目录体积（未压缩） ==="
+        du -sh .ccache .go-build-cache dl/go-mod-cache \
+               staging_dir/host build_dir/host \
+               staging_dir/toolchain-* build_dir/toolchain-* 2>/dev/null || true
+
+    - name: Save toolchain cache
+      if: always() && steps.tc-cache.outputs.cache-hit != 'true'
+      continue-on-error: true
+      uses: actions/cache/save@v4
+      with:
+        key: toolchain-${{ steps.ck.outputs.toolchain }}
+        path: |
+          /mnt/workdir/openwrt/staging_dir/host
+          /mnt/workdir/openwrt/staging_dir/toolchain-*
+          /mnt/workdir/openwrt/build_dir/host
+          /mnt/workdir/openwrt/build_dir/toolchain-*
+
+    - name: Save ccache
+      if: always()
+      continue-on-error: true
+      uses: actions/cache/save@v4
+      with:
+        key: ccache-${{ github.run_id }}
+        path: /mnt/workdir/openwrt/.ccache
+
+    - name: Save Go caches
+      if: always()
+      continue-on-error: true
+      uses: actions/cache/save@v4
+      with:
+        key: gocache-${{ github.run_id }}
+        path: |
+          /mnt/workdir/openwrt/.go-build-cache
+          /mnt/workdir/openwrt/dl/go-mod-cache
+
+    - name: Prune old caches
+      if: always()
+      continue-on-error: true
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        # 仓库总配额 10 GB，超了 GitHub 按 LRU 自己删，会把三份缓存互相踢掉。
+        # 每个前缀只留最新一份。
+        for p in ccache- gocache- toolchain-; do
+          gh cache list --repo "$GITHUB_REPOSITORY" --key "$p" --limit 100 \
+             --json id,createdAt --jq 'sort_by(.createdAt)|reverse|.[1:]|.[].id' |
+          while read -r id; do
+            [ -n "$id" ] && gh cache delete "$id" --repo "$GITHUB_REPOSITORY" || true
+          done
+        done
+        echo "=== 保留的缓存 ==="
+        gh cache list --repo "$GITHUB_REPOSITORY" --limit 20
 
     - name: Generate package index
       run: |

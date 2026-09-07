@@ -10,7 +10,7 @@
 | 设备 | `rockchip / armv8 / friendlyarm_nanopi-r5s` |
 | 网卡驱动 | `kmod-r8125`（ImmortalWrt 自带，厂商驱动，优于官方 OpenWrt 的 `r8169`） |
 | 根文件系统 | squashfs + overlay，分区 2 = **2048 MB**（其余 eMMC 空间留给 Docker） |
-| 默认地址 | `192.168.11.1` |
+| 默认地址 | `192.168.0.1`（主机名 `OpenWrt`） |
 
 ## 内容
 
@@ -57,6 +57,48 @@ Go 包的编译。
 | `main` | `luasrc/` | 老 Lua 版，24.10 上界面打不开 ❌ |
 
 后端 `adguardhome` 用 ImmortalWrt feed 自带的，不额外引入。
+
+## 构建缓存
+
+一次冷编译约 277 分钟，其中 `package/compile` 一步就占 208 分钟。CI 里做了三层缓存
+（`actions/cache`，仓库总配额 10 GB）：
+
+| 缓存 | 内容 | key | 省掉 |
+|---|---|---|---|
+| `toolchain-<hash>` | `staging_dir/{host,toolchain-*}`、`build_dir/{host,toolchain-*}` | `tools/ toolchain/ include/` 全树 sha256 + 工具链相关 `.config` 行 + `$WORKDIR` | tools & toolchain 约 35 分钟 |
+| `ccache-<run_id>` | `.ccache` | 前缀回退到最近一份 | C/C++ 重编，全量 kmod 是大头 |
+| `gocache-<run_id>` | `.go-build-cache` + `dl/go-mod-cache` | 前缀回退 | Go 重编（ccache 对 Go 完全无效） |
+
+几个设计上的取舍：
+
+- **不缓存 `dl/` 整个目录**。3 GB 只换 7 分钟下载，是三者里性价比最差的；但 Go 的
+  模块缓存 `dl/go-mod-cache`（`golang-values.mk:258`）是在 `package/compile` 阶段现拉的，
+  在关键路径上，所以单独捞出来缓存。
+- **不缓存 `build_dir/target-*`**。全量 kmod + 全部软件包的构建目录二三十 GB，
+  远超 10 GB 配额，压了也塞不下。208 分钟只能靠 ccache/gocache 摊薄，没法直接跳过。
+- **不碰 stamp 文件**。常见的 `cachewrtbuild` 会主动 `touch` `.built`/`.configured`
+  来强行跳过重编，这里不做——缓存只是把文件放回去，要不要重编仍然由 make 的依赖判断说了算。
+  慢一点，但不会出现「缓存和源码对不上却照样跳过」的怪问题。
+- **工具链缓存只吃精确命中**，没有 `restore-keys` 回退。里面全是绝对路径
+  （libtool `.la`、pkg-config `.pc`、各种 wrapper 脚本），半匹配比没有更危险，
+  所以 `$WORKDIR` 也拌进了 key——换了工作目录就自动作废。
+- **失败也存**。所有 save 步骤都是 `if: always()`，编到一半炸了照样把 ccache/gocache
+  留下来，下一次重试不用从零开始。
+- **每个前缀只留一份**。三份缓存加起来逼近 10 GB，留两代会触发 GitHub 的 LRU 淘汰、
+  互相把对方踢掉，所以每次跑完删掉同前缀的旧条目。
+
+两个配置上的坑：
+
+- `CONFIG_CCACHE` 的 prompt 是 `bool "Use ccache" if DEVEL`（`config/Config-devel.in:82`），
+  不开 `CONFIG_DEVEL=y` 就没有 prompt，`make defconfig` 会静悄悄把它丢掉。所以
+  `Verify resolved config` 把这两个符号列进了「缺失即失败」。
+- Go 的构建缓存默认在 `$(TMP_DIR)/go-build`（`golang-values.mk:257`），而 `tmp/`
+  每次 make 都重建，等于没缓存。`diy-part2.sh` 里把 `CONFIG_GOLANG_BUILD_CACHE_DIR`
+  改到树根下的 `.go-build-cache`。
+
+第一次跑仍然是全量（缓存是空的），从第二次起才有效果。构建日志里的
+`Cache stats` 步骤会打印 ccache 命中率和各目录体积，用来判断要不要调
+`CCACHE_MAXSIZE`（当前 3G）。
 
 ## 分区规划（重要）
 
@@ -127,7 +169,7 @@ docker info | grep -i 'storage driver'
 
 ## 刷机
 
-用 `*-ext4-sysupgrade.img.gz`：
+用 `*-squashfs-sysupgrade.img.gz`：
 
 1. 从[友善官网](https://wiki.friendlyelec.com/wiki/index.php/NanoPi_R5S/zh)下 eflasher 镜像烧到 TF 卡
 2. 把本固件的 `.img.gz` 拷到卡上的 `FriendlyARM` 目录
