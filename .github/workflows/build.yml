@@ -20,7 +20,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 350
+    timeout-minutes: 355
 
     steps:
     - name: Checkout
@@ -129,7 +129,18 @@ jobs:
           CONFIG_PACKAGE_kmod-fs-ntfs3=y \
           CONFIG_PACKAGE_kmod-nvme=y \
           CONFIG_PACKAGE_mosdns=y \
-          CONFIG_PACKAGE_geo2txt=y ; do
+          CONFIG_PACKAGE_geo2txt=y \
+          CONFIG_PACKAGE_luci-app-adguardhome=y \
+          CONFIG_PACKAGE_adguardhome=y \
+          CONFIG_PACKAGE_luci-app-argon-config=y \
+          CONFIG_PACKAGE_luci-app-zerotier=y \
+          CONFIG_PACKAGE_luci-app-frpc=y \
+          CONFIG_PACKAGE_luci-app-aria2=y \
+          CONFIG_PACKAGE_luci-app-nlbwmon=y \
+          CONFIG_PACKAGE_luci-app-watchcat=y \
+          CONFIG_PACKAGE_luci-app-commands=y \
+          CONFIG_PACKAGE_luci-app-advanced-reboot=y \
+          CONFIG_PACKAGE_luci-app-eqos=y ; do
           if grep -qx "$s" .config; then echo "  OK   $s"; else echo "  WARN $s (被 defconfig 丢弃)"; fi
         done
         echo "kmod 模块总数: $(grep -c '^CONFIG_PACKAGE_kmod-.*=m$' .config)"

@@ -18,6 +18,10 @@
 - **DNS**：MosDNS（feed 自带 5.3.3 本体 + sbwml 的 LuCI 界面）
 - **容器**：dockerd + docker-compose + DockerMan
 - **NAS**：DiskMan、Samba4、qBittorrent、FileBrowser
+- **广告过滤**：AdGuardHome（feed 自带后端 + sirpdboy `js` 分支界面）
+- **组网**：ZeroTier、frpc
+- **下载**：aria2
+- **运维**：nlbwmon 流量统计、watchcat 断网重连、commands 自定义命令、advanced-reboot、eqos 限速
 - **商店**：iStore
 - **离线 kmod 源**：全量 kmod 打包进固件 `/usr/lib/opkg/kmods`，`opkg` 通过 `file://` 直接安装，不依赖网络
 
@@ -42,6 +46,17 @@ sbwml `v5` 分支里的 mosdns 是 **5.3.4**，`go.mod` 要求 **Go 1.24.9**；�
 所以这里只从 sbwml 取 `luci-app-mosdns` 和 `geo2txt`（纯 C），本体用 feed 里的，
 **不动 golang 工具链**——换 golang 会连带影响 xray / sing-box / mihomo 等一整串
 Go 包的编译。
+
+## 关于 AdGuardHome 界面的分支选择
+
+`sirpdboy/luci-app-adguardhome` 有两个分支，**必须用 `js`**：
+
+| 分支 | 内容 | 适用 |
+|---|---|---|
+| `js` | `htdocs/` | LuCI 24.10（JS 版）✅ |
+| `main` | `luasrc/` | 老 Lua 版，24.10 上界面打不开 ❌ |
+
+后端 `adguardhome` 用 ImmortalWrt feed 自带的，不额外引入。
 
 ## 刷机
 

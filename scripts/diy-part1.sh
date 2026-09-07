@@ -36,5 +36,21 @@ cp -r /tmp/mosdns-src/luci-app-mosdns package/mosdns/
 cp -r /tmp/mosdns-src/geo2txt        package/mosdns/
 rm -rf /tmp/mosdns-src
 
+# ---------------------------------------------------------------------------
+# AdGuardHome
+#
+# 后端 adguardhome 本体 ImmortalWrt feed 里就有（packages/net/adguardhome），
+# 只缺 LuCI 界面。
+#
+# 必须用 sirpdboy 仓库的 js 分支：
+#   js   分支 = htdocs/  → LuCI 24.10 的 JS 版界面（正确）
+#   main 分支 = luasrc/  → 老 Lua 版，24.10 上装了界面打不开
+# 依赖 +adguardhome +wget-ssl +tar +xz-utils，在 24.10 里都能解析。
+# ---------------------------------------------------------------------------
+rm -rf /tmp/agh-src
+git clone --depth=1 -b js https://github.com/sirpdboy/luci-app-adguardhome /tmp/agh-src
+cp -r /tmp/agh-src/luci-app-adguardhome package/community/
+rm -rf /tmp/agh-src
+
 echo ">>> diy-part1: 完成"
 echo "    package/mosdns 内容: $(ls package/mosdns | tr '\n' ' ')"
