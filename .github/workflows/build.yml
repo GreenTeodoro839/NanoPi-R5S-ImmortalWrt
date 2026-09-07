@@ -202,6 +202,33 @@ jobs:
         make target/install -j$(nproc) || make target/install -j1 V=s
         make checksum
 
+    - name: Verify rootfs fits in partition
+      run: |
+        cd $WORKDIR/openwrt
+        # gen_image_generic.sh 写 rootfs 时没有 count= 限制，squashfs 超出
+        # ROOTFS_PARTSIZE 会静默越界，到刷机时被 dd 的 count= 截断才炸。
+        # rockchip 的 Device/Default 没有 check-size，所以这里自己拦。
+        PARTSIZE=$(sed -n 's/^CONFIG_TARGET_ROOTFS_PARTSIZE=//p' .config)
+        SQ=$(find build_dir -name 'root.squashfs' -type f 2>/dev/null | head -1)
+        if [ -z "$SQ" ]; then
+          echo "未找到 root.squashfs（可能是 ext4 构建），跳过检查"
+          exit 0
+        fi
+        SZ=$(stat -c%s "$SQ")
+        LIMIT=$((PARTSIZE * 1024 * 1024))
+        PCT=$((SZ * 100 / LIMIT))
+        echo "root.squashfs : $((SZ/1048576)) MiB"
+        echo "分区上限      : ${PARTSIZE} MiB"
+        echo "占用          : ${PCT}%"
+        echo "留给 overlay  : $(((LIMIT - SZ)/1048576)) MiB"
+        if [ "$SZ" -ge "$LIMIT" ]; then
+          echo "::error::squashfs ($((SZ/1048576)) MiB) 超过 ROOTFS_PARTSIZE (${PARTSIZE} MiB)，镜像会静默损坏"
+          exit 1
+        fi
+        if [ "$PCT" -ge 80 ]; then
+          echo "::warning::squashfs 已占分区 ${PCT}%，留给 overlay 的空间不多了"
+        fi
+
     - name: Collect firmware
       run: |
         cd $WORKDIR/openwrt/bin/targets/rockchip/armv8
