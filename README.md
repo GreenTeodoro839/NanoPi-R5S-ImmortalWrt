@@ -59,6 +59,124 @@ Go 包的编译。
 
 后端 `adguardhome` 用 ImmortalWrt feed 自带的，不额外引入。
 
+## 如何定制
+
+仓库只有四个地方需要动，改完 push 就会自动触发构建（`configs/**`、`scripts/**`、
+`.github/workflows/build.yml` 任一变化都会触发；只改 README 不会）。
+
+```
+configs/r5s.config      装哪些包、分区多大        ← 90% 的改动在这
+scripts/diy-part1.sh    拉第三方源码、动 feeds    （feeds update 之前跑）
+scripts/diy-part2.sh    改默认配置                （make defconfig 之前跑）
+files/                  直接塞进固件的文件         （由 CI 在构建中生成，见下）
+```
+
+### 加插件
+
+在 `configs/r5s.config` 里加一行就行，**不用改 workflow**：
+
+```
+CONFIG_PACKAGE_luci-app-xxx=y
+```
+
+加之前先确认包名真的存在，否则 `make defconfig` 会静默丢弃（校验会拦下来，
+但白等三分钟）：
+
+```sh
+# luci 应用
+curl -sI https://raw.githubusercontent.com/immortalwrt/luci/openwrt-24.10/applications/luci-app-xxx/Makefile
+# 主题在 themes/，协议插件在 protocols/，别只找 applications/
+# 用户态软件
+curl -sI https://raw.githubusercontent.com/immortalwrt/packages/openwrt-24.10/net/xxx/Makefile
+```
+
+一般只写 `luci-app-*` 就够，后端会被 `LUCI_DEPENDS` 自动拉进来。**例外**：依赖
+里没列的东西不会自动带。踩过的坑——`luci-proto-wireguard` 的依赖不含
+`kmod-wireguard`，而本项目开了 `ALL_KMODS` 让所有 kmod 默认 `=m`（只进离线源、
+不装进固件），结果建隧道时才发现模块不在。所以拿不准就把关键依赖显式写上，
+让 `verify-config.sh` 盯住。
+
+改完可以先本地干跑校验，不用等 CI：
+
+```sh
+./scripts/verify-config.sh configs/r5s.config <某次构建产出的.config>
+```
+
+### 加第三方软件源
+
+有两种，选哪种取决于要不要跟 feed 里的同名包冲突。
+
+**A. 整个源码目录塞进 `package/`** —— 适合单个插件仓库，在 `scripts/diy-part1.sh` 里：
+
+```sh
+git clone --depth=1 https://github.com/OWNER/REPO package/community/REPO
+```
+
+如果这个仓库带的包和 feed 里重名，**必须先删掉 feed 里的**，否则构建会因重复包报错：
+
+```sh
+rm -rf feeds/packages/net/mosdns          # 先删 feed 版
+git clone --depth=1 -b v5 https://github.com/sbwml/luci-app-mosdns package/mosdns
+```
+
+只想要仓库里的一部分时，克隆到临时目录再挑（本项目对 mosdns 就是这么做的，
+因为 sbwml 的 mosdns 5.3.4 要 Go 1.24.9，超过自带的 1.23.12）：
+
+```sh
+git clone --depth=1 -b v5 https://github.com/sbwml/luci-app-mosdns /tmp/src
+cp -r /tmp/src/luci-app-mosdns package/mosdns/     # 只要界面
+cp -r /tmp/src/geo2txt          package/mosdns/     # 和它的纯 C 依赖
+rm -rf /tmp/src                                     # 本体继续用 feed 里的
+```
+
+**B. 加成 feed** —— 适合大型包集合，在 `diy-part1.sh` 里追加到 `feeds.conf.default`：
+
+```sh
+echo 'src-git-full smallpkg https://github.com/kenzok8/small-package;main' >> feeds.conf.default
+```
+
+顺序有讲究：**放在 packages/luci 之后**，同名包才会被第三方版本覆盖。装的时候
+建议点名装而不是 `-a` 全装，否则一堆重名冲突：
+
+```sh
+./scripts/feeds install -p smallpkg luci-app-xxx
+```
+
+### 加自定义脚本 / 塞文件进固件
+
+**改默认配置**（IP、主机名等）用 `scripts/diy-part2.sh`，它在 `make defconfig`
+之前跑，改的是"生成默认配置的逻辑"：
+
+```sh
+sed -i 's/192\.168\.1\.1/192.168.11.1/g' package/base-files/files/bin/config_generate
+```
+
+**直接塞文件进固件**用 `files/` 目录——源码根目录下叫 `files` 的目录会被原样
+叠加进 rootfs（机制在 `package/Makefile` 的 `prepare_rootfs`）。路径即固件里的
+绝对路径：
+
+```sh
+mkdir -p files/etc/config
+cp my-network files/etc/config/network        # 会覆盖 config_generate 生成的
+mkdir -p files/etc/dropbear
+echo "ssh-ed25519 AAAA... you@host" > files/etc/dropbear/authorized_keys
+```
+
+`files/` 优先级高于 `diy-part2.sh` 改的生成逻辑，两者别混用同一个文件。
+
+**时机很关键**：`files/` 必须在 `make package/install` 之前填好。本项目的
+workflow 已经把构建拆成了多段，正是为了在中间插入这类操作：
+
+```
+package/compile → package/index → [预置 OpenClash 内核] → [塞 kmod 离线源] → package/install → target/install
+                                   ↑ 往 files/ 写东西就插在这一段
+```
+
+要加自己的预置脚本，写成 `scripts/preset-xxx.sh`（参考
+`scripts/preset-clash-core.sh`），然后在 `build.yml` 里 `Generate package index`
+和 `Build rootfs & image` 之间加一步调用即可。脚本里记得校验下载结果非空——
+宁可构建失败，也别出一个内核是 0 字节的固件。
+
 ## 构建校验
 
 `scripts/verify-config.sh` 在 `make defconfig` 之后比对种子配置与最终 `.config`，
