@@ -87,64 +87,10 @@ jobs:
     - name: Verify resolved config
       run: |
         cd $WORKDIR/openwrt
-        fail=0
-        echo "### 必须存在（缺失即失败） ###"
-        for s in \
-          CONFIG_TARGET_rockchip=y \
-          CONFIG_TARGET_rockchip_armv8=y \
-          CONFIG_TARGET_ROOTFS_SQUASHFS=y \
-          CONFIG_TARGET_ROOTFS_PARTSIZE=2048 \
-          CONFIG_ALL_KMODS=y \
-          CONFIG_PACKAGE_dockerd=y \
-          CONFIG_PACKAGE_luci-app-dockerman=y \
-          CONFIG_PACKAGE_luci-app-passwall=y \
-          CONFIG_PACKAGE_luci-app-store=y \
-          CONFIG_PACKAGE_luci-app-nikki=y \
-          CONFIG_PACKAGE_luci-app-mosdns=y ; do
-          if grep -qx "$s" .config; then echo "  OK   $s"; else echo "  MISS $s"; fail=1; fi
-        done
-        echo "### 设备 profile（两种写法任一即可） ###"
-        if grep -qx 'CONFIG_TARGET_DEVICE_rockchip_armv8_DEVICE_friendlyarm_nanopi-r5s=y' .config; then
-          echo "  OK   multi-profile 形式"
-        elif grep -qx 'CONFIG_TARGET_rockchip_armv8_DEVICE_friendlyarm_nanopi-r5s=y' .config; then
-          echo "  OK   single-profile 形式"
-        else
-          echo "  MISS 两种形式都没有 —— 设备没选上"
-          grep -E '^CONFIG_TARGET_(PROFILE|MULTI_PROFILE)|nanopi-r5s' .config || true
-          fail=1
-        fi
-        echo "### 可选（缺失只告警） ###"
-        for s in \
-          CONFIG_PACKAGE_luci-app-openclash=y \
-          CONFIG_PACKAGE_luci-app-homeproxy=y \
-          CONFIG_PACKAGE_luci-app-qbittorrent=y \
-          CONFIG_PACKAGE_luci-app-filebrowser=y \
-          CONFIG_PACKAGE_luci-app-diskman=y \
-          CONFIG_PACKAGE_luci-app-samba4=y \
-          CONFIG_PACKAGE_luci-theme-argon=y \
-          CONFIG_PACKAGE_mihomo-meta=y \
-          CONFIG_PACKAGE_htop=y \
-          CONFIG_PACKAGE_ethtool=y \
-          CONFIG_PACKAGE_lsblk=y \
-          CONFIG_PACKAGE_kmod-fs-ntfs3=y \
-          CONFIG_PACKAGE_kmod-nvme=y \
-          CONFIG_PACKAGE_mosdns=y \
-          CONFIG_PACKAGE_geo2txt=y \
-          CONFIG_PACKAGE_luci-app-adguardhome=y \
-          CONFIG_PACKAGE_adguardhome=y \
-          CONFIG_PACKAGE_luci-app-argon-config=y \
-          CONFIG_PACKAGE_luci-app-zerotier=y \
-          CONFIG_PACKAGE_luci-app-frpc=y \
-          CONFIG_PACKAGE_luci-app-aria2=y \
-          CONFIG_PACKAGE_luci-app-nlbwmon=y \
-          CONFIG_PACKAGE_luci-app-watchcat=y \
-          CONFIG_PACKAGE_luci-app-commands=y \
-          CONFIG_PACKAGE_luci-app-advanced-reboot=y \
-          CONFIG_PACKAGE_luci-app-eqos=y ; do
-          if grep -qx "$s" .config; then echo "  OK   $s"; else echo "  WARN $s (被 defconfig 丢弃)"; fi
-        done
-        echo "kmod 模块总数: $(grep -c '^CONFIG_PACKAGE_kmod-.*=m$' .config)"
-        [ $fail -eq 0 ] || { echo "关键配置缺失，中止"; exit 1; }
+        # 校验规则从 configs/r5s.config 推导，不在此处硬编码包名，
+        # 加包只需改种子配置一处。
+        bash $GITHUB_WORKSPACE/scripts/verify-config.sh \
+             $GITHUB_WORKSPACE/$CONFIG_FILE .config
 
     - name: Check package prerequisites
       run: |
@@ -184,6 +130,13 @@ jobs:
         ls -la bin/targets/rockchip/armv8/packages/ | head -5
         echo "kmod ipk 数量: $(ls bin/targets/rockchip/armv8/packages/kmod-*.ipk 2>/dev/null | wc -l)"
         du -sh bin/targets/rockchip/armv8/packages/
+
+    - name: Preset OpenClash core
+      run: |
+        cd $WORKDIR/openwrt
+        # OpenClash 的内核默认要运行时联网下载，对一台"还没联网时要靠它联网"
+        # 的机器不合适，构建期直接塞进 files/。
+        bash $GITHUB_WORKSPACE/scripts/preset-clash-core.sh arm64
 
     - name: Embed local kmod feed into rootfs
       run: |

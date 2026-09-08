@@ -22,7 +22,8 @@
 - **组网**：ZeroTier、frpc
 - **下载**：aria2
 - **运维**：nlbwmon 流量统计、watchcat 断网重连、commands 自定义命令、advanced-reboot、eqos 限速
-- **商店**：iStore
+- **商店**：iStore（含 `taskd` / `luci-lib-taskd` / `luci-lib-xterm` 依赖）
+- **OpenClash 内核**：构建期预置 `clash_meta` + GeoIP/GeoSite，开箱即用不需联网下载
 - **离线 kmod 源**：全量 kmod 打包进固件 `/usr/lib/opkg/kmods`，`opkg` 通过 `file://` 直接安装，不依赖网络
 
 ## 为什么要内置 kmod 源
@@ -57,6 +58,22 @@ Go 包的编译。
 | `main` | `luasrc/` | 老 Lua 版，24.10 上界面打不开 ❌ |
 
 后端 `adguardhome` 用 ImmortalWrt feed 自带的，不额外引入。
+
+## 构建校验
+
+`scripts/verify-config.sh` 在 `make defconfig` 之后比对种子配置与最终 `.config`，
+**校验清单从 `configs/r5s.config` 推导，不在 workflow 里硬编码包名**——加包只改
+种子配置一处。
+
+必要性：`make defconfig` 遇到无法解析的符号（包名写错、依赖不满足、符号被
+`menu ... depends on` 挡住）会**静默丢弃且不报错**。本项目被坑过两次：
+
+- `CONFIG_TARGET_DEVICE_..._nanopi-r5s=y` 因为漏了 `TARGET_MULTI_PROFILE` 被丢弃，
+  等于根本没选设备
+- 若干包名写错，静默不进固件
+
+`scripts/verify-rootfs`（内联在 workflow）另外拦截 squashfs 超出分区的情况，
+见下文分区规划。
 
 ## 分区规划（重要）
 
