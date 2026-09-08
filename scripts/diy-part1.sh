@@ -52,5 +52,19 @@ git clone --depth=1 -b js https://github.com/sirpdboy/luci-app-adguardhome /tmp/
 cp -r /tmp/agh-src/luci-app-adguardhome package/community/
 rm -rf /tmp/agh-src
 
+# ---------------------------------------------------------------------------
+# 内核补丁
+#
+# 放进 target/linux/rockchip/patches-6.6/，由 OpenWrt 的 quilt 流程自动应用。
+# 补丁打不上时构建会直接失败（不会静默跳过），所以不用额外校验。
+# ---------------------------------------------------------------------------
+PATCH_DIR="target/linux/rockchip/patches-6.6"
+if [ -d "$GITHUB_WORKSPACE/patches/rockchip" ] && [ -d "$PATCH_DIR" ]; then
+    for f in "$GITHUB_WORKSPACE"/patches/rockchip/*.patch; do
+        [ -e "$f" ] || continue
+        cp -v "$f" "$PATCH_DIR/"
+    done
+fi
+
 echo ">>> diy-part1: 完成"
 echo "    package/mosdns 内容: $(ls package/mosdns | tr '\n' ' ')"
